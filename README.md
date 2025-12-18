@@ -1,3 +1,5 @@
+`ItsDrike` is not maintaining the plugin anymore, that's why i wanted have my own fork and add the fixes. The plugin currently works with the latest Hyprland version (v0.52.2) and I will try to keep it up to date as much as possible.
+
 # Dwindle-Autogroup
 
 This plugin changes the behavior of the `togglegroup` dispatcher for dwindle layout, to automatically group all of the child windows when a new group is created.
