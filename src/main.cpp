@@ -19,7 +19,7 @@ APICALL EXPORT void PLUGIN_EXIT()
     if (g_pDestroyGroupHook) {
         g_pDestroyGroupHook->unhook();
         HyprlandAPI::removeFunctionHook(PHANDLE, g_pDestroyGroupHook);
-        g_pCreateGroupHook = nullptr;
+        g_pDestroyGroupHook = nullptr;
     }
 
     // Plugin unloading was successful
@@ -34,7 +34,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     // Find pointers to functions by name (from the Hyprland binary)
     g_pNodeFromWindow =
-        (nodeFromWindowFuncT)findHyprlandFunction("getNodeFromWindow", "CHyprDwindleLayout::getNodeFromWindow(std::shared_ptr<CWindow>)");
+        (nodeFromWindowFuncT)findHyprlandFunction("getNodeFromWindow", "CHyprDwindleLayout::getNodeFromWindow(Hyprutils::Memory::CSharedPointer<CWindow>)");
     auto pCreateGroup = findHyprlandFunction("createGroup", "CWindow::createGroup()");
     auto pDestroyGroup = findHyprlandFunction("destroyGroup", "CWindow::destroyGroup()");
 

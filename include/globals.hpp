@@ -5,9 +5,10 @@
 #include <hyprland/src/layout/DwindleLayout.hpp>
 #include <hyprland/src/plugins/HookSystem.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/helpers/Color.hpp>
 #include <hyprlang.hpp>
 
-const CColor s_notifyColor = {0x61 / 255.0f, 0xAF / 255.0f, 0xEF / 255.0f, 1.0f}; // RGBA
+const CHyprColor s_notifyColor = {0x61 / 255.0f, 0xAF / 255.0f, 0xEF / 255.0f, 1.0f}; // RGBA
 const PLUGIN_DESCRIPTION_INFO s_pluginDescription = {"dwindle-autogroup", "Dwindle Autogroup", "ItsDrike", "1.0"};
 
 inline HANDLE PHANDLE = nullptr;

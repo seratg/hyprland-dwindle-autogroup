@@ -1,6 +1,8 @@
 #include "plugin.hpp"
 #include "globals.hpp"
 #include <hyprland/src/Compositor.hpp>
+#include <hyprland/src/desktop/Window.hpp>
+#include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/managers/LayoutManager.hpp>
 #include <hyprland/src/render/decorations/CHyprGroupBarDecoration.hpp>
 
@@ -34,7 +36,7 @@ void collectGroupWindows(std::vector<PHLWINDOW>* pMembersVec, PHLWINDOW pWindow)
 {
     PHLWINDOW curr = pWindow;
     do {
-        curr = curr->m_sGroupData.pNextWindow.lock();
+        curr = curr->m_groupData.pNextWindow.lock();
         pMembersVec->push_back(curr);
     } while (curr != pWindow);
 }
@@ -51,10 +53,21 @@ void moveIntoGroup(PHLWINDOW pWindow, PHLWINDOW pGroupHeadWindow)
 {
     Debug::log(LOG, "[dwindle-autogroup] Moving window {:x} into group {:x}", pWindow, pGroupHeadWindow);
 
-    if (pWindow->m_sGroupData.deny)
+    if (!pWindow || !pGroupHeadWindow) {
+        Debug::log(ERR, "[dwindle-autogroup] Null window pointer in moveIntoGroup");
         return;
+    }
+
+    if (pWindow->m_groupData.deny) {
+        Debug::log(LOG, "[dwindle-autogroup] Window denied grouping");
+        return;
+    }
 
     const auto P_LAYOUT = g_pLayoutManager->getCurrentLayout();
+    if (!P_LAYOUT) {
+        Debug::log(ERR, "[dwindle-autogroup] No layout available");
+        return;
+    }
 
     // remove the window from layout (will become a part of a group)
     P_LAYOUT->onWindowRemoved(pWindow);
@@ -63,7 +76,13 @@ void moveIntoGroup(PHLWINDOW pWindow, PHLWINDOW pGroupHeadWindow)
     // Depending on the config, the new window will either be inserted after
     // the current/head window in the group, or at the end of the group.
     const auto* USE_CURR_POS = (Hyprlang::INT* const*)g_pConfigManager->getConfigValuePtr("group:insert_after_current");
-    PHLWINDOW pGroupInsertionWindow = *USE_CURR_POS ? pGroupHeadWindow : pGroupHeadWindow->getGroupTail();
+    PHLWINDOW pGroupInsertionWindow = (USE_CURR_POS && *USE_CURR_POS) ? pGroupHeadWindow : pGroupHeadWindow->getGroupTail();
+
+    if (!pGroupInsertionWindow) {
+        Debug::log(ERR, "[dwindle-autogroup] Failed to get group insertion window");
+        return;
+    }
+
     pGroupInsertionWindow->insertWindowToGroup(pWindow);
 
     // Since the inserted window is not becoming the group head, we need to hide it
@@ -71,10 +90,9 @@ void moveIntoGroup(PHLWINDOW pWindow, PHLWINDOW pGroupHeadWindow)
     // making it the new group head)
     pWindow->setHidden(true);
 
-    pGroupHeadWindow->updateWindowDecos();
-    g_pLayoutManager->getCurrentLayout()->recalculateWindow(pGroupHeadWindow);
+    // Add group bar decoration if needed
     if (!pWindow->getDecorationByType(DECORATION_GROUPBAR))
-        pWindow->addWindowDeco(std::make_unique<CHyprGroupBarDecoration>(pWindow));
+        pWindow->addWindowDeco(makeUnique<CHyprGroupBarDecoration>(pWindow));
 }
 
 /*! Check common pre-conditions for group creation/deletion and perform needed initializations
@@ -98,22 +116,22 @@ void newCreateGroup(CWindow* self)
 {
     // Run the original function first, creating a "classical" group
     // with just the currently selected window in it
-    ((createGroupFuncT)g_pCreateGroupHook->m_pOriginal)(self);
+    ((createGroupFuncT)g_pCreateGroupHook->m_original)(self);
 
     // Only continue if the group really was created, as there are some pre-conditions to that
     // checked in the original function
-    if (self->m_sGroupData.pNextWindow.expired()) {
+    if (self->m_groupData.pNextWindow.expired()) {
         Debug::log(LOG, "[dwindle-autogroup] Ignoring autogroup - invalid / non-group widnow");
         return;
     }
 
     // Skip floating windows
-    if (self->m_bIsFloating) {
+    if (self->m_isFloating) {
         Debug::log(LOG, "[dwindle-autogroup] Ignoring autogroup for floating window");
         return;
     }
 
-    Debug::log(LOG, "[dwindle-autogroup] Triggered createGroup for {:x}", self->m_pSelf.lock());
+    Debug::log(LOG, "[dwindle-autogroup] Triggered createGroup for {:x}", self->m_self.lock());
 
     // Obtain an instance of the dwindle layout, also run some general pre-conditions
     // for the plugin, quit now if they're not met.
@@ -124,35 +142,77 @@ void newCreateGroup(CWindow* self)
     Debug::log(LOG, "[dwindle-autogroup] Collecting dwindle child nodes");
 
     // Collect all child dwindle nodes, we'll want to add all of those into a group
-    const auto P_DWINDLE_NODE = g_pNodeFromWindow(pDwindleLayout, self->m_pSelf.lock());
+    PHLWINDOW pSelfWindow = self->m_self.lock();
+    if (!pSelfWindow) {
+        Debug::log(ERR, "[dwindle-autogroup] Failed to lock self window");
+        return;
+    }
+
+    const auto P_DWINDLE_NODE = g_pNodeFromWindow(pDwindleLayout, pSelfWindow);
+    if (!P_DWINDLE_NODE) {
+        Debug::log(ERR, "[dwindle-autogroup] Failed to get dwindle node for window");
+        return;
+    }
+
     const auto P_PARENT_NODE = P_DWINDLE_NODE->pParent;
     if (!P_PARENT_NODE) {
         Debug::log(LOG, "[dwindle-autogroup] Ignoring autogroup for a single window");
         return;
     }
+
     const auto P_SIBLING_NODE = P_PARENT_NODE->children[0] == P_DWINDLE_NODE ? P_PARENT_NODE->children[1] : P_PARENT_NODE->children[0];
+    if (!P_SIBLING_NODE) {
+        Debug::log(ERR, "[dwindle-autogroup] Sibling node is null");
+        return;
+    }
+
     std::deque<SDwindleNodeData*> p_dDwindleNodes;
     collectDwindleChildNodes(&p_dDwindleNodes, P_SIBLING_NODE);
 
-    // Stop if one of the dwindle child nodes is already in a group
+    // Collect window pointers before modifying the layout
+    // (node pointers become invalid after onWindowRemoved is called)
+    std::vector<PHLWINDOW> vWindows;
     for (auto& node : p_dDwindleNodes) {
         auto curWindow = node->pWindow.lock();
-        if (!curWindow->m_sGroupData.pNextWindow.expired()) {
+        if (!curWindow) {
+            Debug::log(LOG, "[dwindle-autogroup] Skipping null window");
+            continue;
+        }
+        // Stop if one of the dwindle child nodes is already in a group
+        if (!curWindow->m_groupData.pNextWindow.expired()) {
             Debug::log(LOG, "[dwindle-autogroup] Ignoring autogroup for nested groups: window {:x} is group", curWindow);
             return;
         }
+        vWindows.push_back(curWindow);
     }
 
-    Debug::log(LOG, "[dwindle-autogroup] Found {} dwindle nodes to autogroup", p_dDwindleNodes.size());
+    Debug::log(LOG, "[dwindle-autogroup] Found {} windows to autogroup", vWindows.size());
 
-    // Add all of the dwindle child node widnows into the group
-    for (auto& node : p_dDwindleNodes) {
-        auto curWindow = node->pWindow.lock();
+    // Get the group head window once (already locked earlier as pSelfWindow)
+    if (!pSelfWindow) {
+        Debug::log(ERR, "[dwindle-autogroup] Group head window is null");
+        return;
+    }
+
+    // Add all of the dwindle child node windows into the group
+    for (auto& curWindow : vWindows) {
+        if (!curWindow) {
+            Debug::log(LOG, "[dwindle-autogroup] Skipping null window in grouping loop");
+            continue;
+        }
         Debug::log(LOG, "[dwindle-autogroup] Moving window {:x} into group", curWindow);
-        moveIntoGroup(curWindow, self->m_pSelf.lock());
+        moveIntoGroup(curWindow, pSelfWindow);
     }
 
-    Debug::log(LOG, "[dwindle-autogroup] Autogroup done, {} child nodes moved", p_dDwindleNodes.size());
+    // Update decorations and recalculate layout only once after all windows are added
+    pSelfWindow->updateWindowDecos();
+
+    const auto P_LAYOUT_FINAL = g_pLayoutManager->getCurrentLayout();
+    if (P_LAYOUT_FINAL) {
+        P_LAYOUT_FINAL->recalculateWindow(pSelfWindow);
+    }
+
+    Debug::log(LOG, "[dwindle-autogroup] Autogroup done, {} windows moved", vWindows.size());
 }
 
 void newDestroyGroup(CWindow* self)
@@ -166,39 +226,55 @@ void newDestroyGroup(CWindow* self)
     // head was on.
 
     // Only continue if the window is in a group
-    if (self->m_sGroupData.pNextWindow.expired()) {
+    if (self->m_groupData.pNextWindow.expired()) {
         Debug::log(LOG, "[dwindle-autogroup] Ignoring ungroup - invalid / non-group widnow");
         return;
     }
 
-    Debug::log(LOG, "[dwindle-autogroup] Triggered destroyGroup for {:x}", self->m_pSelf.lock());
+    Debug::log(LOG, "[dwindle-autogroup] Triggered destroyGroup for {:x}", self->m_self.lock());
 
     // Obtain an instance of the dwindle layout, also run some general pre-conditions
     // for the plugin, fall back now if they're not met.
     CHyprDwindleLayout* pDwindleLayout = nullptr;
     if (!handleGroupOperation(&pDwindleLayout)) {
-        ((createGroupFuncT)g_pDestroyGroupHook->m_pOriginal)(self);
+        ((destroyGroupFuncT)g_pDestroyGroupHook->m_original)(self);
         return;
     }
 
     std::vector<PHLWINDOW> vGroupWindows;
-    collectGroupWindows(&vGroupWindows, self->m_pSelf.lock());
+    collectGroupWindows(&vGroupWindows, self->m_self.lock());
+
+    if (vGroupWindows.empty()) {
+        Debug::log(LOG, "[dwindle-autogroup] No windows in group, aborting");
+        return;
+    }
+
+    PHLWINDOW pSelfWindow = self->m_self.lock();
 
     // If the group head window is in fullscreen, unfullscreen it.
     // We need to have the window placed in the layout, to figure out where
     // to ungroup the rest of the windows.
-    g_pCompositor->setWindowFullscreen(self->m_pSelf.lock(), false, FULLSCREEN_FULL);
+    g_pCompositor->setWindowFullscreenState(pSelfWindow, SFullscreenState{.internal = FSMODE_NONE, .client = FSMODE_NONE});
 
     Debug::log(LOG, "[dwindle-autogroup] Ungroupping {} windows", vGroupWindows.size());
 
     // Set a groups lock flag
-    const bool GROUPS_LOCKED_PREV = g_pKeybindManager->m_bGroupsLocked;
-    g_pKeybindManager->m_bGroupsLocked = true;
+    const bool GROUPS_LOCKED_PREV = g_pKeybindManager->m_groupsLocked;
+    g_pKeybindManager->m_groupsLocked = true;
 
+    // First pass: break all group links
     for (PHLWINDOW pWindow : vGroupWindows) {
+        if (!pWindow) continue;
+        Debug::log(LOG, "[dwindle-autogroup] Breaking group links for window {:x}", pWindow);
+        pWindow->m_groupData.pNextWindow.reset();
+        pWindow->m_groupData.head = false;
+    }
+
+    // Second pass: process windows and add them to layout
+    for (PHLWINDOW pWindow : vGroupWindows) {
+        if (!pWindow) continue;
+
         Debug::log(LOG, "[dwindle-autogroup] Ungroupping window {:x}", pWindow);
-        pWindow->m_sGroupData.pNextWindow.reset();
-        pWindow->m_sGroupData.head = false;
 
         // Current / Visible window (this isn't always the head)
         if (!pWindow->isHidden()) {
@@ -211,15 +287,12 @@ void newDestroyGroup(CWindow* self)
             // which is what causes the weird ungroupping behavior as this window
             // is then recreated, which spawns it in a potentially unexpected place
             // (often determined by the cursor position).
-
-            // Update the window decorations (removing group bar)
-            pWindow->updateWindowDecos();
         }
         else {
+            Debug::log(LOG, "[dwindle-autogroup] -> Hidden window ungroup");
             pWindow->setHidden(false);
 
             g_pLayoutManager->getCurrentLayout()->onWindowCreatedTiling(pWindow);
-            pWindow->updateWindowDecos();
 
             // Focus the window that we just spawned, so that on the next iteration
             // the window created will be it's dwindle child node.
@@ -235,14 +308,21 @@ void newDestroyGroup(CWindow* self)
         }
     }
 
-    g_pKeybindManager->m_bGroupsLocked = GROUPS_LOCKED_PREV;
+    g_pKeybindManager->m_groupsLocked = GROUPS_LOCKED_PREV;
 
-    Debug::log(LOG, "[dwindle-autogroup] All windows ungroupped");
+    Debug::log(LOG, "[dwindle-autogroup] All windows ungroupped, updating decorations");
+
+    // Update decorations for all windows at the end
+    for (PHLWINDOW pWindow : vGroupWindows) {
+        if (!pWindow) continue;
+        pWindow->updateWindowDecos();
+    }
 
     g_pCompositor->updateAllWindowsAnimatedDecorationValues();
 
     // Leave with the focus the original (main) window
-    g_pCompositor->focusWindow(self->m_pSelf.lock());
+    if (pSelfWindow)
+        g_pCompositor->focusWindow(pSelfWindow);
 
     Debug::log(LOG, "[dwindle-autogroup] Ungroupping done");
 }
