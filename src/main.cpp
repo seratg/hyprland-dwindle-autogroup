@@ -30,13 +30,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 {
     PHANDLE = handle;
 
-    Debug::log(LOG, "[dwindle-autogroup] Loading Hyprland functions");
+    Log::logger->log(Log::INFO, "[dwindle-autogroup] Loading Hyprland functions");
 
     // Find pointers to functions by name (from the Hyprland binary)
     g_pNodeFromWindow =
-        (nodeFromWindowFuncT)findHyprlandFunction("getNodeFromWindow", "CHyprDwindleLayout::getNodeFromWindow(Hyprutils::Memory::CSharedPointer<CWindow>)");
-    auto pCreateGroup = findHyprlandFunction("createGroup", "CWindow::createGroup()");
-    auto pDestroyGroup = findHyprlandFunction("destroyGroup", "CWindow::destroyGroup()");
+        (nodeFromWindowFuncT)findHyprlandFunction("getNodeFromWindow", "CHyprDwindleLayout::getNodeFromWindow(Hyprutils::Memory::CSharedPointer<Desktop::View::CWindow>)");
+    auto pCreateGroup = findHyprlandFunction("createGroup", "Desktop::View::CWindow::createGroup()");
+    auto pDestroyGroup = findHyprlandFunction("destroyGroup", "Desktop::View::CWindow::destroyGroup()");
 
     // Return immediately if one of the functions wasn't found
     if (!g_pNodeFromWindow || !pCreateGroup || !pDestroyGroup) {
@@ -46,7 +46,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         return s_pluginDescription;
     }
 
-    Debug::log(LOG, "[dwindle-autogroup] Registering function hooks");
+    Log::logger->log(Log::INFO, "[dwindle-autogroup] Registering function hooks");
 
     // Register function hooks, for overriding the original group methods
     g_pCreateGroupHook = HyprlandAPI::createFunctionHook(PHANDLE, pCreateGroup, (void*)&newCreateGroup);
