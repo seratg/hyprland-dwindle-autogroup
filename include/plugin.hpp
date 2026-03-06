@@ -1,9 +1,6 @@
 #include "globals.hpp"
 
-/* New custom function replacing the original CWindow::createGroup function
+/* New custom function replacing CKeybindManager::toggleGroup.
+ * Handles both auto-group creation and auto-group destruction.
  */
-void newCreateGroup(CWindow*);
-
-/* New custom function replacing the original CWindow::destroyGroup function
- */
-void newDestroyGroup(CWindow*);
+SDispatchResult newToggleGroup(std::string);

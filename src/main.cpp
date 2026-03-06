@@ -10,19 +10,12 @@ APICALL EXPORT std::string PLUGIN_API_VERSION()
 
 APICALL EXPORT void PLUGIN_EXIT()
 {
-    // Unhook the overridden functions and remove the hooks
-    if (g_pCreateGroupHook) {
-        g_pCreateGroupHook->unhook();
-        HyprlandAPI::removeFunctionHook(PHANDLE, g_pCreateGroupHook);
-        g_pCreateGroupHook = nullptr;
-    }
-    if (g_pDestroyGroupHook) {
-        g_pDestroyGroupHook->unhook();
-        HyprlandAPI::removeFunctionHook(PHANDLE, g_pDestroyGroupHook);
-        g_pDestroyGroupHook = nullptr;
+    if (g_pToggleGroupHook) {
+        g_pToggleGroupHook->unhook();
+        HyprlandAPI::removeFunctionHook(PHANDLE, g_pToggleGroupHook);
+        g_pToggleGroupHook = nullptr;
     }
 
-    // Plugin unloading was successful
     HyprlandAPI::addNotification(PHANDLE, "[dwindle-autogroup] Unloaded successfully!", s_notifyColor, 5000);
 }
 
@@ -32,29 +25,23 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     Log::logger->log(Log::INFO, "[dwindle-autogroup] Loading Hyprland functions");
 
-    // Find pointers to functions by name (from the Hyprland binary)
-    g_pNodeFromWindow =
-        (nodeFromWindowFuncT)findHyprlandFunction("getNodeFromWindow", "CHyprDwindleLayout::getNodeFromWindow(Hyprutils::Memory::CSharedPointer<Desktop::View::CWindow>)");
-    auto pCreateGroup = findHyprlandFunction("createGroup", "Desktop::View::CWindow::createGroup()");
-    auto pDestroyGroup = findHyprlandFunction("destroyGroup", "Desktop::View::CWindow::destroyGroup()");
+    g_pNodeFromWindow = (nodeFromWindowFuncT)findHyprlandFunction(
+        "getNodeFromWindow",
+        "Layout::Tiled::CDwindleAlgorithm::getNodeFromWindow(Hyprutils::Memory::CSharedPointer<Desktop::View::CWindow>)");
 
-    // Return immediately if one of the functions wasn't found
-    if (!g_pNodeFromWindow || !pCreateGroup || !pDestroyGroup) {
-        // Set all of the global function pointers to NULL, to avoid any potential issues
+    auto pToggleGroup = findHyprlandFunction(
+        "toggleGroup",
+        "CKeybindManager::toggleGroup(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >)");
+
+    if (!g_pNodeFromWindow || !pToggleGroup) {
         g_pNodeFromWindow = nullptr;
-
         return s_pluginDescription;
     }
 
     Log::logger->log(Log::INFO, "[dwindle-autogroup] Registering function hooks");
 
-    // Register function hooks, for overriding the original group methods
-    g_pCreateGroupHook = HyprlandAPI::createFunctionHook(PHANDLE, pCreateGroup, (void*)&newCreateGroup);
-    g_pDestroyGroupHook = HyprlandAPI::createFunctionHook(PHANDLE, pDestroyGroup, (void*)&newDestroyGroup);
-
-    // Initialize the hooks, from now on, the original functions will be overridden
-    g_pCreateGroupHook->hook();
-    g_pDestroyGroupHook->hook();
+    g_pToggleGroupHook = HyprlandAPI::createFunctionHook(PHANDLE, pToggleGroup, (void*)&newToggleGroup);
+    g_pToggleGroupHook->hook();
 
     HyprlandAPI::addNotification(PHANDLE, "[dwindle-autogroup] Initialized successfully!", s_notifyColor, 5000);
     return s_pluginDescription;
