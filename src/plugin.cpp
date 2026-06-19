@@ -1,5 +1,6 @@
 #include "plugin.hpp"
 #include "globals.hpp"
+#include <deque>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/view/Group.hpp>
@@ -7,8 +8,8 @@
 
 using Desktop::View::SFullscreenState;
 
-/*! Recursively collect all dwindle child nodes for given root node */
-void collectDwindleChildNodes(std::deque<SP<Layout::Tiled::SDwindleNodeData>>* pDeque, SP<Layout::Tiled::SDwindleNodeData> pNode)
+/*! Recursively collect all dwindle leaf nodes for given root node */
+static void collectDwindleChildNodes(std::deque<SP<Layout::Tiled::SDwindleNodeData>>* pDeque, SP<Layout::Tiled::SDwindleNodeData> pNode)
 {
     if (!pNode)
         return;
@@ -36,50 +37,47 @@ static Layout::Tiled::CDwindleAlgorithm* getDwindleAlgo(PHLWINDOW pWindow)
     return dynamic_cast<Layout::Tiled::CDwindleAlgorithm*>(pAlgo->tiledAlgo().get());
 }
 
-/*! After original toggleGroup creates a group (with just pSelfWindow), add dwindle siblings. */
-static void newAutoCreateGroup(PHLWINDOW pSelfWindow)
+/*! Collect the dwindle siblings of pSelfWindow that should join the group.
+ *  Must be called BEFORE toggleGroup so the window is still a tiled leaf.
+ *  Returns empty vector if not applicable (floating, not dwindle, already grouped sibling). */
+static std::vector<PHLWINDOW> collectDwindleSiblings(PHLWINDOW pSelfWindow)
 {
-    if (!pSelfWindow->m_group) {
-        Log::logger->log(Log::INFO, "[dwindle-autogroup] Ignoring autogroup - group was not created");
-        return;
-    }
-
     if (pSelfWindow->m_isFloating) {
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Ignoring autogroup for floating window");
-        return;
+        return {};
     }
 
     auto* pDwindleAlgo = getDwindleAlgo(pSelfWindow);
     if (!pDwindleAlgo) {
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Ignoring non-dwindle layout");
-        return;
+        return {};
     }
-
-    Log::logger->log(Log::INFO, "[dwindle-autogroup] Collecting dwindle child nodes");
 
     const auto P_DWINDLE_NODE = g_pNodeFromWindow(pDwindleAlgo, pSelfWindow);
     if (!P_DWINDLE_NODE) {
         Log::logger->log(Log::ERR, "[dwindle-autogroup] Failed to get dwindle node for window");
-        return;
+        return {};
     }
 
     const auto P_PARENT_NODE = P_DWINDLE_NODE->pParent.lock();
     if (!P_PARENT_NODE) {
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Ignoring autogroup for a single window");
-        return;
+        return {};
     }
 
-    const auto P_SIBLING_NODE = P_PARENT_NODE->children[0].lock() == P_DWINDLE_NODE ? P_PARENT_NODE->children[1].lock() : P_PARENT_NODE->children[0].lock();
+    const auto P_SIBLING_NODE = P_PARENT_NODE->children[0].lock() == P_DWINDLE_NODE
+        ? P_PARENT_NODE->children[1].lock()
+        : P_PARENT_NODE->children[0].lock();
     if (!P_SIBLING_NODE) {
         Log::logger->log(Log::ERR, "[dwindle-autogroup] Sibling node is null");
-        return;
+        return {};
     }
 
-    std::deque<SP<Layout::Tiled::SDwindleNodeData>> p_dDwindleNodes;
-    collectDwindleChildNodes(&p_dDwindleNodes, P_SIBLING_NODE);
+    std::deque<SP<Layout::Tiled::SDwindleNodeData>> dwindleNodes;
+    collectDwindleChildNodes(&dwindleNodes, P_SIBLING_NODE);
 
-    std::vector<PHLWINDOW> vWindows;
-    for (auto& node : p_dDwindleNodes) {
+    std::vector<PHLWINDOW> result;
+    for (auto& node : dwindleNodes) {
         auto pTarget = node->pTarget.lock();
         if (!pTarget) {
             Log::logger->log(Log::INFO, "[dwindle-autogroup] Skipping null target");
@@ -90,25 +88,15 @@ static void newAutoCreateGroup(PHLWINDOW pSelfWindow)
             Log::logger->log(Log::INFO, "[dwindle-autogroup] Skipping null window");
             continue;
         }
-        // Abort if any sibling is already in a group
         if (curWindow->m_group) {
             Log::logger->log(Log::INFO, "[dwindle-autogroup] Ignoring autogroup for nested groups: window {:x} is in a group", curWindow);
-            return;
+            return {};
         }
-        vWindows.push_back(curWindow);
+        result.push_back(curWindow);
     }
 
-    Log::logger->log(Log::INFO, "[dwindle-autogroup] Found {} windows to autogroup", vWindows.size());
-
-    // CGroup::add() handles removing windows from the layout and adding group decorations
-    for (auto& curWindow : vWindows) {
-        if (!curWindow)
-            continue;
-        Log::logger->log(Log::INFO, "[dwindle-autogroup] Moving window {:x} into group", curWindow);
-        pSelfWindow->m_group->add(curWindow);
-    }
-
-    Log::logger->log(Log::INFO, "[dwindle-autogroup] Autogroup done, {} windows moved", vWindows.size());
+    Log::logger->log(Log::INFO, "[dwindle-autogroup] Collected {} siblings to autogroup", result.size());
+    return result;
 }
 
 /*! Custom ungroup logic that places windows back in the dwindle tree extending from the group head. */
@@ -119,10 +107,8 @@ static void newAutoDestroyGroup(PHLWINDOW pSelfWindow, std::vector<PHLWINDOW> vG
         return;
     }
 
-    // Keep the group alive throughout (individual window m_group fields get reset during removal)
     auto pGroup = pSelfWindow->m_group;
 
-    // Determine current layout
     auto* pDwindleAlgo = getDwindleAlgo(pSelfWindow);
     if (!pDwindleAlgo) {
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Non-dwindle layout, falling back to original destroy");
@@ -130,7 +116,6 @@ static void newAutoDestroyGroup(PHLWINDOW pSelfWindow, std::vector<PHLWINDOW> vG
         return;
     }
 
-    // Exit fullscreen for the group head if needed
     if (pSelfWindow->isFullscreen())
         g_pCompositor->setWindowFullscreenState(pSelfWindow, SFullscreenState{.internal = FSMODE_NONE, .client = FSMODE_NONE});
 
@@ -139,36 +124,26 @@ static void newAutoDestroyGroup(PHLWINDOW pSelfWindow, std::vector<PHLWINDOW> vG
     const bool GROUPS_LOCKED_PREV = g_pKeybindManager->m_groupsLocked;
     g_pKeybindManager->m_groupsLocked = true;
 
-    // The visible (current) window should be removed last so switchTargets gives it the group's position
     PHLWINDOW pVisible = pGroup->current();
     if (!pVisible)
         pVisible = pSelfWindow;
 
-    // Focus the visible window first — it's the focal point for placing the first hidden window
     Desktop::focusState()->fullWindowFocus(pVisible, Desktop::FOCUS_REASON_OTHER);
 
-    // Remove all non-visible windows first.
-    // CGroup::remove() calls assignToSpace() for non-last windows, which adds them to the
-    // dwindle layout next to the focused window.
     for (PHLWINDOW pWindow : vGroupWindows) {
         if (!pWindow || pWindow == pVisible)
             continue;
 
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Ungrouping window {:x}", pWindow);
         pGroup->remove(pWindow);
-
-        // Focus the just-placed window so the next one is placed as its dwindle child
         Desktop::focusState()->fullWindowFocus(pWindow, Desktop::FOCUS_REASON_OTHER);
     }
 
-    // Remove the visible window last — it's the only remaining window, so CGroup::remove()
-    // calls switchTargets() to put it at the group's original layout position.
     if (pGroup->has(pVisible))
         pGroup->remove(pVisible);
 
     g_pKeybindManager->m_groupsLocked = GROUPS_LOCKED_PREV;
 
-    // Update decorations for all ungrouped windows
     for (PHLWINDOW pWindow : vGroupWindows) {
         if (!pWindow)
             continue;
@@ -177,38 +152,44 @@ static void newAutoDestroyGroup(PHLWINDOW pSelfWindow, std::vector<PHLWINDOW> vG
 
     g_pCompositor->updateAllWindowsAnimatedDecorationValues();
 
-    // Return focus to the original window
     if (pSelfWindow)
         Desktop::focusState()->fullWindowFocus(pSelfWindow, Desktop::FOCUS_REASON_OTHER);
 
     Log::logger->log(Log::INFO, "[dwindle-autogroup] Ungrouping done");
 }
 
-SDispatchResult newToggleGroup(std::string args)
+Config::Actions::ActionResult newToggleGroup(std::optional<PHLWINDOW> window)
 {
-    const auto PWINDOW = Desktop::focusState()->window();
+    const auto PWINDOW = window.value_or(Desktop::focusState()->window());
 
-    if (!PWINDOW) {
-        // No focused window, let original handle it
-        return ((toggleGroupFuncT)g_pToggleGroupHook->m_original)(args);
-    }
+    if (!PWINDOW)
+        return ((toggleGroupFuncT)g_pToggleGroupHook->m_original)(window);
 
-    bool isCreating = !PWINDOW->m_group;
+    const bool isCreating = !PWINDOW->m_group;
 
     if (isCreating) {
-        // Call original to create the group with just the focused window
-        SDispatchResult result = ((toggleGroupFuncT)g_pToggleGroupHook->m_original)(args);
-        if (!result.success)
+        // Collect siblings BEFORE calling original — the window is still a tiled
+        // leaf in the dwindle tree here. After toggleGroup runs, it becomes part
+        // of a CWindowGroupTarget and getNodeFromWindow returns null.
+        auto siblings = collectDwindleSiblings(PWINDOW);
+
+        auto result = ((toggleGroupFuncT)g_pToggleGroupHook->m_original)(window);
+        if (!result.has_value())
             return result;
 
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Triggered createGroup for {:x}", PWINDOW);
 
-        // After creation, add dwindle siblings into the new group
-        newAutoCreateGroup(PWINDOW);
+        if (!siblings.empty() && PWINDOW->m_group) {
+            for (auto& w : siblings) {
+                Log::logger->log(Log::INFO, "[dwindle-autogroup] Moving window {:x} into group", w);
+                PWINDOW->m_group->add(w);
+            }
+            Log::logger->log(Log::INFO, "[dwindle-autogroup] Autogroup done, {} windows moved", siblings.size());
+        }
+
         return result;
     }
     else {
-        // Capture group members before we destroy the group
         std::vector<PHLWINDOW> vGroupMembers;
         for (auto& wr : PWINDOW->m_group->windows()) {
             if (auto w = wr.lock())
@@ -216,9 +197,7 @@ SDispatchResult newToggleGroup(std::string args)
         }
 
         Log::logger->log(Log::INFO, "[dwindle-autogroup] Triggered destroyGroup for {:x}", PWINDOW);
-
-        // Handle destroy with custom dwindle-aware logic (does NOT call original)
         newAutoDestroyGroup(PWINDOW, vGroupMembers);
-        return {};
+        return Config::Actions::SActionResult{};
     }
 }

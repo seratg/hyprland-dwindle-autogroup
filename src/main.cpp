@@ -31,7 +31,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     auto pToggleGroup = findHyprlandFunction(
         "toggleGroup",
-        "CKeybindManager::toggleGroup(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >)");
+        "Config::Actions::toggleGroup(std::optional<Hyprutils::Memory::CSharedPointer<Desktop::View::CWindow> >)");
 
     if (!g_pNodeFromWindow || !pToggleGroup) {
         g_pNodeFromWindow = nullptr;
